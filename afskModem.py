@@ -1,5 +1,6 @@
 import pyaudio
 import numpy as np
+from scipy.io.wavfile import write
 
 sample_rate = 48000
 high_amplitude = 32767
@@ -64,7 +65,7 @@ class ByteBitConverter:
             res.append(int(input_bits[i:i+8], 2))
         return bytes(res)
 
-def test_afsk_with_msg(message:str, baud_rate: int= 1200):
+def test_afsk_with_msg(message:str, baud_rate: int= 300, output_file: str="testAudioOutput.wav"):
     # Convert the message to binary bits
     byte_converter = ByteBitConverter()
     
@@ -85,32 +86,34 @@ def test_afsk_with_msg(message:str, baud_rate: int= 1200):
     # Convert the audio data to a numpy array and play using pyaudio
     audio_samples = np.array(audio_data, dtype=np.int16)
     
-    # Set up pyaudio to play the generated tone
-    p = pyaudio.PyAudio()
-    # Print available devices
-    for i in range(p.get_device_count()):
-        device_info = p.get_device_info_by_index(i)
-        print(f"Device {i}: {device_info['name']}")
+    write(output_file, sample_rate, audio_samples)
 
-    # Select the desired device index
-    device_index = 1  # Replace with the index of your preferred output device
+    # # Set up pyaudio to play the generated tone
+    # p = pyaudio.PyAudio()
+    # # Print available devices
+    # for i in range(p.get_device_count()):
+    #     device_info = p.get_device_info_by_index(i)
+    #     print(f"Device {i}: {device_info['name']}")
+
+    # # Select the desired device index
+    # device_index = 1  # Replace with the index of your preferred output device
     
-    # Open the stream with an explicit device index
-    stream = p.open(format=pyaudio.paInt16,
-                    channels=1,
-                    rate=sample_rate,
-                    output=True,
-                    output_device_index=device_index)
-    print(f"Playing AFSK modulated message: {message}")
-    stream.write(audio_samples.tobytes())
+    # # Open the stream with an explicit device index
+    # stream = p.open(format=pyaudio.paInt16,
+    #                 channels=1,
+    #                 rate=sample_rate,
+    #                 output=True,
+    #                 output_device_index=device_index)
+    # print(f"Playing AFSK modulated message: {message}")
+    # stream.write(audio_samples.tobytes())
 
-    # Clean up the stream and pyaudio
-    stream.stop_stream()
-    stream.close()
-    p.terminate()
+    # # Clean up the stream and pyaudio
+    # stream.stop_stream()
+    # stream.close()
+    # p.terminate()
 
 # Test with a sample message, we can hear the AFSK modulated tones for the test msg
 # To visualize the signal further, you can save audio_samples as a .wav file 
 # and open it in a tool like GNURadio for a spectrogram analysis.
 test_message = "Hello, my name is rui, how about you"
-test_afsk_with_msg(test_message)
+test_afsk_with_msg(test_message, baud_rate=300)
