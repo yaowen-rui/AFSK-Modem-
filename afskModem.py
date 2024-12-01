@@ -8,6 +8,8 @@ sample_rate = 48000 #Audio playback on Mac device works best at a 48 kHz sample 
 high_amplitude = 32767
 low_amplitude = -32768
 
+preamble = "1010101010101010"# Known preamble for synchronization
+
 class AFSKWaves:
 
     @staticmethod
@@ -71,6 +73,10 @@ class Sender:
         # Convert the message to binary bits
         data = message.encode('utf-8')
         bit_string = self.__byte_converter.bytesToBitStr(data)
+
+        # Add a preamble (10 alternating bits) at beginning of each message
+        bit_string = preamble + bit_string
+
         audio_data = []
         # Generate tones for each bit in the binary string
         for bit in bit_string:
@@ -110,7 +116,7 @@ class Sender:
 
 
 class Receiver:
-    def __init__(self, baud_rate: int = 300, amp_start_threshold=14000, amp_end_threshold=9000 ):
+    def __init__(self, baud_rate: int = 300, amp_start_threshold=18000, amp_end_threshold=14000 ):
         self.__space_tone: list[int] = AFSKWaves.generateSpaceTone(baud_rate)
         self.__mark_tone: list[int] = AFSKWaves.generateMarkTone(baud_rate)
         self.__byte_converter = ByteBitConverter()
@@ -158,73 +164,96 @@ class Receiver:
 
         bit_string = self.__reform_bit_String(audio_data, frames_per_bit)
 
-        # Convert bit string to bytes
-        original_message = self.__byte_converter.bitStrToBytes(bit_string).decode('utf-8')
-        return original_message
+        # Search for the preamble in the bit string
+        if preamble in bit_string:
+            print("Preamble detected.")
+            start_index = bit_string.index(preamble) + len(preamble)  # Start decoding after the preamble
+            message_bits = bit_string[start_index:]
 
-    """ record the audio for a specified timeout duration(second) from the microphone """
-    # something wrong， can't detect the siganl with mircophone
-    def __listen(self, timeout: float) ->list[int]:
-        recorded_frames: list[int] = []
-        listened_frames: int = 0
-        timeout_frames = int(timeout * sample_rate )  # Convert timeout to frame count
+            # Convert the bit string to bytes and decode to a string
+            try:
+                original_message = self.__byte_converter.bitStrToBytes(message_bits).decode('utf-8', errors='ignore')
+                return original_message
+            except UnicodeDecodeError:
+                print("Error decoding message from bit string.")
+                return ""
+        else:
+            print("Preamble not found in the audio.")
+            return ""
+
         
-        #initialize pyaudio and microphone input stream
+    def receive_with_microphone_realtime(self, timeout: float) -> str:
+        """
+        Listen to the microphone and decode the message in real-time
+        """
+        print("Listening for signal...")
+        received_bits = []
+        chunk_size = 1024
+        recorded_frames = 0
+        max_frames = int(timeout * sample_rate)
+        baud_rate = 300
+        frames_per_bit = sample_rate // baud_rate
+
+        # Initialize PyAudio stream
         p = pyaudio.PyAudio()
         stream = p.open(format=pyaudio.paInt16,
                         channels=1,
                         rate=sample_rate,
                         input=True,
-                        frames_per_buffer=1024)
-        print("Listening for start signal...")
-        
-        #listen for the start of the signal
-        while listened_frames < timeout_frames:
-            frames = np.frombuffer(stream.read(1024, exception_on_overflow=False), dtype=np.int16)
-            if AFSKWaves.getAmplitude(frames) > self.__amp_start_threshold:
-                print("Signal detected, recording started")
-                recorded_frames.extend(frames)  # Start recording
-                break
-            listened_frames += 1024
+                        frames_per_buffer=chunk_size)
 
-        # Continue recording until the signal falls below the end threshold
-        while True:
-            frames = np.frombuffer(stream.read(1024, exception_on_overflow=False), dtype=np.int16)
-            recorded_frames.extend(frames)
-            if AFSKWaves.getAmplitude(frames) < self.__amp_end_threshold:
-                print("Signal ended, recording stopped")
-                break
-        
-        # If timeout reached without detecting a start signal, return empty
-        if listened_frames >= timeout_frames:
-            print("Timeout: No signal detected")
+        try:
+            while recorded_frames < max_frames:
+                # Read a chunk of audio data
+                audio_chunk = np.frombuffer(stream.read(chunk_size, exception_on_overflow=False), dtype=np.int16)
+                recorded_frames += chunk_size
+
+                # Apply bandpass filter to remove noise
+                filtered_chunk = self.bandpass_filter(audio_chunk, 1000, 2500, sample_rate)
+
+                # Decode bits from the chunk
+                bit_string = ""
+                for i in range(0, len(filtered_chunk), frames_per_bit):
+                    chunk = filtered_chunk[i:i + frames_per_bit]
+
+                    # Perform FFT to identify dominant frequency
+                    fft_result = np.fft.fft(chunk)
+                    freqs = np.fft.fftfreq(len(chunk), 1 / sample_rate)
+                    dominant_freq = abs(freqs[np.argmax(np.abs(fft_result))])
+
+                    # Match dominant frequency to space (1200 Hz) or mark (2200 Hz)
+                    if abs(dominant_freq - 1200) < 150:
+                        bit_string += "0"
+                    elif abs(dominant_freq - 2200) < 150:
+                        bit_string += "1"
+
+                # Append decoded bits to the received_bits buffer
+                received_bits.append(bit_string)
+
+                # Check if the preamble exists in the received bits
+                full_bit_string = "".join(received_bits)
+                if preamble in full_bit_string:
+                    print("Preamble detected. Decoding message...")
+                    start_index = full_bit_string.index(preamble) + len(preamble)
+                    message_bits = full_bit_string[start_index:]
+
+                    # Try decoding the message as bytes
+                    try:
+                        decoded_message = self.__byte_converter.bitStrToBytes(message_bits).decode('utf-8', errors='ignore')
+                        return decoded_message
+                    except UnicodeDecodeError:
+                        print("Decoding error. Retrying...")
+                        continue
+
+        finally:
+            # Stop and close the stream
             stream.stop_stream()
             stream.close()
-            return []
+            p.terminate()
 
-        # Stop the stream and close it
-        stream.stop_stream()
-        stream.close()
-        return recorded_frames
-        
-    def receive_with_microphone(self, timeout:float) -> str:
-        received_audio = self.__listen(timeout)
-        if received_audio == []:
-            print("Time out, no data received!")
-            return ""
-        
-        # Convert audio data to a numpy array and apply the same processing as in file-based reception
-        baud_rate = 300
-        frames_per_bit = sample_rate // baud_rate
+        print("Timeout: No signal detected.")
+        return ""
 
-        received_audio = self.bandpass_filter(received_audio, 1000, 2500, sample_rate)
-
-        bit_string = self.__reform_bit_String(received_audio, frames_per_bit)       
-
-        # Decode the bit string into bytes and then to a string
-        received_message = self.__byte_converter.bitStrToBytes(bit_string).decode('utf-8')
-        
-        return received_message
 
 # test_message = "Hello, my name is rui, how about you"*2
 # sender = Sender()
@@ -234,6 +263,6 @@ receiver = Receiver()
 #original_msg_file = receiver.read_from_file("ouputAudio.wav")
 #print("original message from file: ",original_msg_file)
 
-original_msg = receiver.receive_with_microphone(timeout=10.0)
+original_msg = receiver.receive_with_microphone_realtime(5.0)
 print("message received with microphone: ", original_msg)
 
