@@ -1,5 +1,6 @@
 import pyaudio
 import numpy as np
+import wave
 from scipy.io.wavfile import write
 from scipy.io.wavfile import read
 from scipy.signal import butter, lfilter
@@ -116,7 +117,7 @@ class Sender:
 
 
 class Receiver:
-    def __init__(self, baud_rate: int = 300, amp_start_threshold=18000, amp_end_threshold=14000 ):
+    def __init__(self, baud_rate: int = 300, amp_start_threshold=10000, amp_end_threshold=8000 ):
         self.__space_tone: list[int] = AFSKWaves.generateSpaceTone(baud_rate)
         self.__mark_tone: list[int] = AFSKWaves.generateMarkTone(baud_rate)
         self.__byte_converter = ByteBitConverter()
@@ -134,13 +135,23 @@ class Receiver:
     # it's correct, tolerance for frequency matching(150) can be adjusted
     def __reform_bit_String(self, audio, frames_per_bit: int) -> str:
         bit_string = ""
+        fft_length = 2 ** int(np.ceil(np.log2(frames_per_bit)))
+
         for i in range(0, len(audio), frames_per_bit):
             chunk = audio[i:i+frames_per_bit]
 
+            # Pad chunk with zeros if it's smaller than fft_length
+            if len(chunk) < fft_length:
+                chunk = np.pad(chunk, (0, fft_length - len(chunk)), mode='constant')
+            
             # Perform FFT to identify dominant frequency
-            fft_result = np.fft.fft(chunk)
+            fft_result = np.fft.fft(chunk, n=fft_length) #To increase frequency resolution, ensure the FFT input is long enough
             freqs = np.fft.fftfreq(len(chunk), 1 / sample_rate)
-            dominant_freq = abs(freqs[np.argmax(np.abs(fft_result))])
+            fft_magnitude = np.abs(fft_result)
+            
+            # find the dominant frequency
+            dominant_freq_index = np.argmax(fft_magnitude)
+            dominant_freq = abs(freqs[dominant_freq_index])
 
             # Match dominant frequency to space (1200 Hz) or mark (2200 Hz)
             if abs(dominant_freq - 1200) < 150:#tolerance, if increase the tolerance from 100 to 150, there is no
@@ -164,31 +175,33 @@ class Receiver:
 
         bit_string = self.__reform_bit_String(audio_data, frames_per_bit)
 
-        # Search for the preamble in the bit string
+        # Check for the preamble in the bit string
         if preamble in bit_string:
             print("Preamble detected.")
             start_index = bit_string.index(preamble) + len(preamble)  # Start decoding after the preamble
             message_bits = bit_string[start_index:]
-
-            # Convert the bit string to bytes and decode to a string
-            try:
-                original_message = self.__byte_converter.bitStrToBytes(message_bits).decode('utf-8', errors='ignore')
-                return original_message
-            except UnicodeDecodeError:
-                print("Error decoding message from bit string.")
-                return ""
         else:
-            print("Preamble not found in the audio.")
+            print("Preamble not found in the audio. Still attempting to decode the entire bit string.")
+            message_bits = bit_string
+
+        # Convert the bit string to bytes and decode to a string
+        try:
+            original_message = self.__byte_converter.bitStrToBytes(message_bits).decode('utf-8', errors='ignore')
+            return original_message
+        except UnicodeDecodeError:
+            print("Error decoding message from bit string.")
             return ""
 
         
-    def receive_with_microphone_realtime(self, timeout: float) -> str:
+    def receive_with_microphone_realtime(self, timeout: float, save_to_file:bool=False, output_filename: str="received_aduio.wav") -> str:
         """
         Listen to the microphone and decode the message in real-time
         """
         print("Listening for signal...")
-        received_bits = []
-        chunk_size = 1024
+        received_bits = ""
+        audio_chunks = [] # for savinga audio to a file
+        
+        chunk_size = 1024 # Adjust this based on baud rate and frames per bit
         recorded_frames = 0
         max_frames = int(timeout * sample_rate)
         baud_rate = 300
@@ -206,36 +219,26 @@ class Receiver:
             while recorded_frames < max_frames:
                 # Read a chunk of audio data
                 audio_chunk = np.frombuffer(stream.read(chunk_size, exception_on_overflow=False), dtype=np.int16)
-                recorded_frames += chunk_size
+                recorded_frames += len(audio_chunk)
+
+                if save_to_file:
+                    audio_chunks.append(audio_chunk)
 
                 # Apply bandpass filter to remove noise
                 filtered_chunk = self.bandpass_filter(audio_chunk, 1000, 2500, sample_rate)
-
+                
                 # Decode bits from the chunk
-                bit_string = ""
-                for i in range(0, len(filtered_chunk), frames_per_bit):
-                    chunk = filtered_chunk[i:i + frames_per_bit]
-
-                    # Perform FFT to identify dominant frequency
-                    fft_result = np.fft.fft(chunk)
-                    freqs = np.fft.fftfreq(len(chunk), 1 / sample_rate)
-                    dominant_freq = abs(freqs[np.argmax(np.abs(fft_result))])
-
-                    # Match dominant frequency to space (1200 Hz) or mark (2200 Hz)
-                    if abs(dominant_freq - 1200) < 150:
-                        bit_string += "0"
-                    elif abs(dominant_freq - 2200) < 150:
-                        bit_string += "1"
+                bit_string = self.__reform_bit_String(filtered_chunk, frames_per_bit)
 
                 # Append decoded bits to the received_bits buffer
-                received_bits.append(bit_string)
+                received_bits += bit_string
 
                 # Check if the preamble exists in the received bits
-                full_bit_string = "".join(received_bits)
-                if preamble in full_bit_string:
+                #full_bit_string = "".join(received_bits)
+                if preamble in received_bits:
                     print("Preamble detected. Decoding message...")
-                    start_index = full_bit_string.index(preamble) + len(preamble)
-                    message_bits = full_bit_string[start_index:]
+                    start_index = received_bits.index(preamble) + len(preamble)
+                    message_bits = received_bits[start_index:]
 
                     # Try decoding the message as bytes
                     try:
@@ -251,6 +254,15 @@ class Receiver:
             stream.close()
             p.terminate()
 
+            # save the recorded audio to a file if enabled
+            if save_to_file and audio_chunks:
+                print(f"Saving recorded audio to {output_filename}...")
+                with wave.open(output_filename, "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(p.get_sample_size(pyaudio.paInt16))
+                    wf.setframerate(sample_rate)
+                    wf.writeframes(b''.join(audio_chunks))
+
         print("Timeout: No signal detected.")
         return ""
 
@@ -263,6 +275,8 @@ receiver = Receiver()
 #original_msg_file = receiver.read_from_file("ouputAudio.wav")
 #print("original message from file: ",original_msg_file)
 
-original_msg = receiver.receive_with_microphone_realtime(5.0)
-print("message received with microphone: ", original_msg)
+#original_msg = receiver.receive_with_microphone_realtime(5.0, save_to_file=True)
+#print("message received with microphone: ", original_msg)
+msg = receiver.read_from_file("received_aduio.wav")
+print(msg)
 
