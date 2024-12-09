@@ -3,7 +3,7 @@ import numpy as np
 import wave
 from scipy.io.wavfile import write
 from scipy.io.wavfile import read
-from scipy.signal import butter, lfilter
+from scipy.signal import butter, lfilter, correlate 
 
 sample_rate = 48000 #Audio playback on Mac device works best at a 48 kHz sample rate.
 high_amplitude = 32767
@@ -33,22 +33,6 @@ class AFSKWaves:
         return mark_wave.astype(np.int16) 
 
     
-    @staticmethod
-    def getAmplitude(frames: list[int]) -> int:
-        """ 
-        calculate the root mean square (RMS) amplitude of audio frames,
-        is useful for detecting when an audio signal starts and ends
-        """
-        # Convert frames to a numpy array
-        frames = np.array(frames, dtype=np.float32)
-
-        # Calculate RMS (Root Mean Square) value, which gives the amplitude
-        rms = np.sqrt(np.mean(frames**2))
-        
-        # Convert to integer value if needed (keeping the scale intact)
-        return int(rms)
-         
-
 class ByteBitConverter:
     # input_bytes= 'Hi', H (ASCII 72) is converted to '01001000', i (ASCII 105) is converted to '01101001'.
     # ''.join(...) then combines these binary strings into '0100100001101001'
@@ -117,12 +101,10 @@ class Sender:
 
 
 class Receiver:
-    def __init__(self, baud_rate: int = 300, amp_start_threshold=10000, amp_end_threshold=8000 ):
+    def __init__(self, baud_rate: int = 300 ):
         self.__space_tone: list[int] = AFSKWaves.generateSpaceTone(baud_rate)
         self.__mark_tone: list[int] = AFSKWaves.generateMarkTone(baud_rate)
         self.__byte_converter = ByteBitConverter()
-        self.__amp_start_threshold: int = amp_start_threshold  # Example threshold for starting recording (adjust as needed)
-        self.__amp_end_threshold:int = amp_end_threshold
 
     """remove noise outside the expected frequency range (below 1000 Hz or above 2500 Hz)"""
     def bandpass_filter(self, data, lowcut, highcut, fs, order=5):
@@ -201,13 +183,12 @@ class Receiver:
         received_bits = ""
         audio_chunks = [] # for savinga audio to a file
         
-        chunk_size = 1024 # Adjust this based on baud rate and frames per bit
         recorded_frames = 0
         max_frames = int(timeout * sample_rate)
         baud_rate = 300
         frames_per_bit = sample_rate // baud_rate
-
-        # Initialize PyAudio stream
+        chunk_size = frames_per_bit*10 # Adjust this based on baud rate and frames per bit
+        
         p = pyaudio.PyAudio()
         stream = p.open(format=pyaudio.paInt16,
                         channels=1,
@@ -226,7 +207,6 @@ class Receiver:
 
                 # Apply bandpass filter to remove noise
                 filtered_chunk = self.bandpass_filter(audio_chunk, 1000, 2500, sample_rate)
-                
                 # Decode bits from the chunk
                 bit_string = self.__reform_bit_String(filtered_chunk, frames_per_bit)
 
@@ -272,11 +252,11 @@ class Receiver:
 # sender.send_msg(test_message)
 # sender.write_to_file(test_message, "ouputAudio.wav")
 receiver = Receiver()
-#original_msg_file = receiver.read_from_file("ouputAudio.wav")
-#print("original message from file: ",original_msg_file)
+# original_msg_file = receiver.read_from_file("ouputAudio.wav")
+# print("original message from file: ",original_msg_file)
 
-#original_msg = receiver.receive_with_microphone_realtime(5.0, save_to_file=True)
-#print("message received with microphone: ", original_msg)
+original_msg = receiver.receive_with_microphone_realtime(5.0, save_to_file=True)
+print("message received with microphone: ", original_msg)
 msg = receiver.read_from_file("received_aduio.wav")
 print(msg)
 
