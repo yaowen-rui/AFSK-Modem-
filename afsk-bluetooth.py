@@ -3,6 +3,7 @@ import numpy as np
 import wave
 import matplotlib.pyplot as plt
 import struct
+import bluetooth
 from scipy.io.wavfile import write, read
 from scipy.signal import butter, lfilter, correlate
 
@@ -96,32 +97,21 @@ class Sender:
         audio_samples = self.prepare_for_sending(message)
         write(filename, sample_rate, audio_samples)
 
-    def send_via_bluetooth(self, message: str, target_bluetooth_address:str, filename:str):
+    def send_via_bluetooth(self, message: str, filename:str):
         """
+        direct bluetooth socket communication does not work on MacOS, instead use 
+        Bluetooth File Exchange utility, which is available by default om macOS
         Send the encoded audio .wav file via Bluetooth.
-        target_bluetooth_address: receiver's Bluetooth MAC address
         """
         try:
             # Create and save the encoded message as a .wav file
             self.write_to_file(message, filename)
-            
-            sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
-            # Connect to the target device
-            sock.connect((target_bluetooth_address, 1))  # RFCOMM channel usually 1
-
-            # Send the file data in chunks
-            with open(filename, 'rb') as f:
-                print(f"Sending file {filename} to {target_bluetooth_address}...")
-                chunk = f.read(1024)
-                while chunk:
-                    sock.send(chunk)
-                    chunk = f.read(1024)
-
-            print("File sent successfully.")
+            print("Triggering Bluetooth File Exchange...")
+            os.system(f"open -a 'Bluetooth File Exchange' {filename}")
+            print("Bluetooth File Exchange launched. Follow the prompts to send the file.")
+        
         except Exception as e:
-            print(f"Failed to send .wav file via Bluetooth: {e}")
-        finally:
-            sock.close()
+            print(f"Failed to trigger Bluetooth File Exchange: {e}")
 
 class Receiver:
     def __init__(self, baud_rate: int = 300):
@@ -285,39 +275,57 @@ class Receiver:
         print("Timeout: No signal detected.")
         return ""
 
-    def receive_via_bluetooth(self, save_path:str) -> str:
-        """ Receive a .wav file via Bluetooth, save it locally, and decode the message using existing functions"""
+    def receive_via_bluetooth(self, save_dir: str = "~/Downloads") -> str:
+        """ Wait for a .wav file to be received via Bluetooth File Exchange on macOS,
+        save it to a directory, and decode the message.
+
+        Args:
+            save_dir (str): Directory where Bluetooth files are saved (default is Downloads).
+
+        Returns:
+            str: Decoded message from the received .wav file.
+        """
         try:
-            server_sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
-            server_sock.bind(("", bluetooth.PORT_ANY))
-            server_sock.listen(1)
+            save_dir = os.path.expanduser(save_dir)
+            print(f"Waiting for incoming .wav files...")
 
-            print("Waiting for connection...")
-            client_sock, address = server_sock.accept()
-            print(f"Connection accepted from {address}")
+            # Initial file list in the directory
+            existing_files = set(os.listdir(save_dir))
 
-            # Receive the file data and save it locally
-            with open(save_path, 'wb') as f:
-                while True:
-                    data = client_sock.recv(1024)
-                    if not data:
+            # Wait for a new file to appear in the directory
+            received_file = None
+            timeout = 20  # Wait for up to 20 seconds
+            start_time = time.time()
+
+            while time.time() - start_time < timeout:
+                current_files = set(os.listdir(save_dir))
+                new_files = current_files - existing_files
+
+                # Check for .wav files among new files
+                for file in new_files:
+                    if file.endswith(".wav"):
+                        received_file = os.path.join(save_dir, file)
+                        print(f"Received file detected: {received_file}")
                         break
-                    f.write(data)
 
-            print(f"File received and saved to {save_path}")
+                if received_file:
+                    break
 
+                time.sleep(1)  # Check every second
+
+            if not received_file:
+                print("No .wav file received within the timeout period.")
+                return ""
+
+            # Decode the received .wav file
             print("Decoding the received .wav file...")
-            decoded_message = self.read_from_file(save_path)
+            decoded_message = self.read_from_file(received_file)
             print("Decoding completed successfully.")
             return decoded_message
 
         except Exception as e:
-            print(f"Failed to receive and decode .wav file via Bluetooth: {e}")
+            print(f"Failed to receive and decode .wav file: {e}")
             return ""
-
-        finally:
-            client_sock.close()
-            server_sock.close()
 
 # test_msg = "Hello, this is a test message. "*2
 # sender = Sender()
