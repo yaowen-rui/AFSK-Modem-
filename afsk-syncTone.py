@@ -53,6 +53,27 @@ class ByteBitConverter:
             res.append(int(byte_str, 2))
         return bytes(res)
 
+# for debug purpose
+class Plot_helper:
+
+    def plot_audio_signal(self, audio_signal, title="Generated audio signal"):
+        import matplotlib.pyplot as plt
+        plt.plot(audio_signal)
+        plt.title(title)
+        plt.xlabel("Sample")
+        plt.ylabel("Amplitude")
+        plt.show()
+    
+    def plot_fft(self, audio_chunk, title="FFT"):
+        import matplotlib.pyplot as plt
+        fft_result = np.fft.fft(audio_chunk)
+        freqs = np.fft.fftfreq(len(audio_chunk), 1 / self.sample_rate)
+        plt.plot(freqs, np.abs(fft_result))
+        plt.title(title)
+        plt.xlabel("Frequency (Hz)")
+        plt.ylabel("Magnitude")
+        plt.show()
+
 class Sender:
     def __init__(self, baud_rate: int = 300):
         self.baud_rate = baud_rate
@@ -77,19 +98,26 @@ class Sender:
         return full_audio_signal
     
     def send_msg(self, message: str):
-        audio_samples = self.prepare_for_sending(message)
-        pa = pyaudio.PyAudio()
-        stream = pa.open(
-            format=pyaudio.paInt16,
-            channels=2,
-            rate=sample_rate,
-            output=True,
-            output_device_index=1
-        )
-        stream.write(audio_samples.tobytes())
-        stream.stop_stream()
-        stream.close()
-        pa.terminate()
+        if not message:
+            print("Message cannot be empty")
+        try:
+
+            audio_samples = self.prepare_for_sending(message)
+            pa = pyaudio.PyAudio()
+            stream = pa.open(
+                format=pyaudio.paInt16,
+                channels=2,
+                rate=sample_rate,
+                output=True,
+                output_device_index=1
+            )
+            stream.write(audio_samples.tobytes())
+        except Exception as e:
+            print(f"Error during audio transmission:{e}")
+        finally:
+            stream.stop_stream()
+            stream.close()
+            pa.terminate()
     
     def write_to_file(self, message:str, filename:str):
         audio_samples = self.prepare_for_sending(message)
@@ -107,6 +135,39 @@ class Receiver:
         self.__byte_converter = ByteBitConverter()
         self.frames_per_bit = sample_rate // baud_rate
 
+        self.noise_profile = None
+
+    def record_noise_profile(self, duration: float = 1.0):
+        """Record a noise profile for spectral subtraction."""
+        p = pyaudio.PyAudio()
+        stream = p.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=sample_rate,
+            input=True,
+            frames_per_buffer=int(sample_rate * duration)
+        )
+        print("Recording noise profile...")
+        noise_chunk = np.frombuffer(stream.read(int(sample_rate * duration)), dtype=np.int16)
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+        self.noise_profile = noise_chunk
+
+    def spectral_subtraction(signal, noise, alpha=1.0):
+        signal_fft = np.fft.fft(signal)
+        noise_fft = np.fft.fft(noise)
+        magnitude = np.abs(signal_fft) - alpha * np.abs(noise_fft)
+        magnitude = np.maximum(magnitude, 0)  # Ensure non-negative magnitudes
+        phase = np.angle(signal_fft)
+        return np.fft.ifft(magnitude * np.exp(1j * phase)).real
+
+    def reduce_noise(self, audio_chunk):
+        """Apply spectral subtraction to reduce noise."""
+        if self.noise_profile is None:
+            raise ValueError("Noise profile not recorded. Call `record_noise_profile` first.")
+        return self.spectral_subtraction(audio_chunk, self.noise_profile)
+    
     def bandpass_filter(self, data, lowcut, highcut, fs, order=5):
         nyquist = 0.5 * fs
         low = lowcut / nyquist
@@ -114,38 +175,29 @@ class Receiver:
         b, a = butter(order, [low, high], btype='band')
         return lfilter(b, a, data)
 
-    def detect_sync_tone(self, audio_chunk, tolerance=150)->bool:
-        """Detect the synchronization tone."""
-        if len(audio_chunk) == 0:
-            return False
-        # Normalize the audio chunk to avoid amplitude issues
-        audio_chunk = audio_chunk / (np.max(np.abs(audio_chunk)) + 1e-8)  # Avoid division by zero
-
-        fft_result = np.fft.fft(audio_chunk, n=int(sample_rate * sync_duration))
-        freqs = np.fft.fftfreq(len(audio_chunk), 1 / sample_rate)
-        fft_magnitude = np.abs(fft_result)
-
-        # Find the dominant frequency
-        dominant_freq_index = np.argmax(fft_magnitude)
-        dominant_freq = abs(freqs[dominant_freq_index])
-
-        # Check if the dominant frequency matches the sync frequency
-        if abs(dominant_freq - sync_frequency) < tolerance:
-            return True
-        return False
+    def detect_sync_tone(self, audio_chunk):
+        """Detect the synchronization tone using cross-correlation."""
+        corr = correlate(audio_chunk, self.__sync_tone, mode='valid')
+        noise_floor = np.mean(np.abs(corr))
+        threshold = noise_floor*2
+        peak_indices = np.where(corr > threshold)[0]
+        if len(peak_indices) > 0:
+            return True, peak_indices[0]
+        return False, -1
     
-    def find_sync_start(self, audio: np.ndarray, sync_duration: float = sync_duration) -> int:
-        """Locate the start of the synchronization tone."""
-        sync_length = int(sync_duration * sample_rate)
-        for i in range(0, len(audio) - sync_length+1, sync_length//4):# Overlap chunks by 75%
+    def find_sync_start(self, audio: np.ndarray) -> int:
+        """Locate the start of the synchronization tone using cross-correlation."""
+        sync_length = len(self.__sync_tone)
+        for i in range(0, len(audio) - sync_length + 1, sync_length // 4):  # Overlap chunks by 75%
             chunk = audio[i:i + sync_length]
-            if self.detect_sync_tone(chunk):
-                print(f"Sync tone detected at index {i}")
-                return i + sync_length  # Start decoding after the sync tone
+            detected, peak_index = self.detect_sync_tone(chunk)
+            if detected:
+                print(f"Sync tone detected at index {i + peak_index}")
+                return i + peak_index + sync_length  # Start decoding after the sync tone
         print("Sync tone not detected in the audio")
         return -1
 
-    def __reform_bit_String(self, audio, frames_per_bit: int, freq_tolerance=150) -> str:
+    def __reform_bit_String(self, audio, frames_per_bit: int, freq_tolerance=200) -> str:
         """Reform a bit string from the audio samples."""
         bit_string = ""
         fft_length = 2 ** int(np.ceil(np.log2(frames_per_bit)))
@@ -154,7 +206,12 @@ class Receiver:
             chunk = audio[i:i+frames_per_bit]
             if len(chunk) < frames_per_bit:
                 break
-            if len(chunk) < fft_length:
+            
+            # reduce spectral leakage
+            window = np.hamming(len(chunk))
+            chunk = chunk * window
+
+            if len(chunk) < fft_length:# pad the chunk if neccessary
                 chunk = np.pad(chunk, (0, fft_length - len(chunk)), mode='constant')
             
             fft_result = np.fft.fft(chunk, n=fft_length)
@@ -164,11 +221,14 @@ class Receiver:
             dominant_freq_index = np.argmax(fft_magnitude)
             dominant_freq = abs(freqs[dominant_freq_index])
 
-            # Determine bit by closest frequency
-            if abs(dominant_freq - 1200) < freq_tolerance:
-                bit_string += "0"
-            elif abs(dominant_freq - 2200) < freq_tolerance:
-                bit_string += "1"
+            # Determine bit by closest frequency with dynamic thresholding
+            noise_floor = np.mean(fft_magnitude) # estimate noise floor
+            threshold = noise_floor * 2 # set thredshold sligtly above noise floor
+            if fft_magnitude[dominant_freq_index] > threshold:
+                if abs(dominant_freq - 1200) < freq_tolerance:
+                    bit_string += "0"
+                elif abs(dominant_freq - 2200) < freq_tolerance:
+                    bit_string += "1"
         return bit_string
     
     def read_from_file(self, filename:str) -> str:
@@ -198,7 +258,9 @@ class Receiver:
         recorded_frames = 0
         max_frames = int(timeout * sample_rate)
         frames_per_bit = sample_rate // self.baud_rate
-        chunk_size = int(sample_rate * 0.1)  # Process in 100 ms chunks
+        chunk_size = int(sample_rate * 0.5)  # Process in 500 ms chunks
+
+        self.record_noise_profile()#record noise profile for spectral subtraction
 
         p = pyaudio.PyAudio()
         stream = p.open(
@@ -217,20 +279,24 @@ class Receiver:
 
                 if save_to_file:
                     audio_chunks.append(audio_chunk)
+                
+                # Bandpass filter the audio to isolate the AFSK tones (1200-2200 Hz)
+                filtered_audio = self.bandpass_filter(audio_chunk, 1000, 2500, sample_rate)
 
-                # Detect synchronization tone (before bandpass filtering)
-                sync_start = self.find_sync_start(audio_chunk)
+                # apply spectral subtraction to reduce noise
+                denoised_audio = self.reduce_noise(filtered_audio)
+
+                # Detect synchronization tone (after bandpass filtering)
+                sync_start = self.find_sync_start(filtered_audio)
+
                 if sync_start != -1:
                     print("Synchronization tone detected. Decoding message...")
 
                     # Remove the sync tone and start decoding the remaining signal
                     remaining_audio = audio_chunk[sync_start:]
 
-                    # Bandpass filter the audio to isolate the AFSK tones (1200-2200 Hz)
-                    filtered_audio = self.bandpass_filter(remaining_audio, 1000, 2500, sample_rate)
-
                     # Decode the filtered audio
-                    bit_string = self.__reform_bit_String(filtered_audio, frames_per_bit)
+                    bit_string = self.__reform_bit_String(remaining_audio, frames_per_bit)
 
                     try:
                         # Convert the bit string to the original message
