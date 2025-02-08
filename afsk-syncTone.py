@@ -3,7 +3,7 @@ import numpy as np
 import wave
 import matplotlib.pyplot as plt
 from scipy.io.wavfile import write, read
-from scipy.signal import butter, lfilter, correlate
+from scipy.signal import butter, lfilter, correlate, sosfiltfilt
 
 
 
@@ -18,7 +18,7 @@ class AFSKWaves:
 
     @staticmethod
     def generateSpaceTone(baud_rate: int) -> np.ndarray:
-        frames = sample_rate // baud_rate
+        frames = sample_rate // baud_rate # number of samples required for one symbol 
         t = np.linspace(0, 1 / baud_rate, frames, endpoint=False)
         frequency = 1200
         space_wave = high_amplitude * np.sin(2 * np.pi * frequency * t)
@@ -33,7 +33,7 @@ class AFSKWaves:
         return mark_wave.astype(np.int16) 
     
     @staticmethod
-    def generateSyncTone(baut_rate:int) -> np.ndarray:
+    def generateSyncTone(baud_rate:int) -> np.ndarray:
         t = np.linspace(0, sync_duration, int(sample_rate * sync_duration), endpoint=False)
         sync_tone = high_amplitude * np.sin(2 * np.pi * sync_frequency * t)
         return sync_tone.astype(np.int16)
@@ -64,10 +64,10 @@ class Plot_helper:
         plt.ylabel("Amplitude")
         plt.show()
     
-    def plot_fft(self, audio_chunk, title="FFT"):
+    def plot_fft(self, audio_chunk, sample_rate, title="FFT"):
         import matplotlib.pyplot as plt
         fft_result = np.fft.fft(audio_chunk)
-        freqs = np.fft.fftfreq(len(audio_chunk), 1 / self.sample_rate)
+        freqs = np.fft.fftfreq(len(audio_chunk), 1 / sample_rate)
         plt.plot(freqs, np.abs(fft_result))
         plt.title(title)
         plt.xlabel("Frequency (Hz)")
@@ -140,21 +140,27 @@ class Receiver:
     def record_noise_profile(self, duration: float = 1.0):
         """Record a noise profile for spectral subtraction."""
         p = pyaudio.PyAudio()
-        stream = p.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=sample_rate,
-            input=True,
-            frames_per_buffer=int(sample_rate * duration)
-        )
-        print("Recording noise profile...")
-        noise_chunk = np.frombuffer(stream.read(int(sample_rate * duration)), dtype=np.int16)
-        stream.stop_stream()
-        stream.close()
-        p.terminate()
+        try:
+            stream = p.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=sample_rate,
+                input=True,
+                frames_per_buffer=int(sample_rate * duration)
+            )
+            print("Recording noise profile...")
+            noise_chunk = np.frombuffer(stream.read(int(sample_rate * duration)), dtype=np.int16)
+        except Exception as e:
+            print(f"Error recording noise profile: {e}")
+            noise_chunk = np.zeros(int(sample_rate * duration))  # Use silence as fallback
+        finally:
+            stream.stop_stream()
+            stream.close()
+            p.terminate()
+            
         self.noise_profile = noise_chunk
 
-    def spectral_subtraction(signal, noise, alpha=1.0):
+    def spectral_subtraction(self, signal, noise, alpha=1.0):
         signal_fft = np.fft.fft(signal)
         noise_fft = np.fft.fft(noise)
         magnitude = np.abs(signal_fft) - alpha * np.abs(noise_fft)
@@ -172,14 +178,17 @@ class Receiver:
         nyquist = 0.5 * fs
         low = lowcut / nyquist
         high = highcut / nyquist
-        b, a = butter(order, [low, high], btype='band')
-        return lfilter(b, a, data)
+        #b, a = butter(order, [low, high], btype='band')
+        #return lfilter(b, a, data)
+        sos = butter(order, [low, high], btype='band', output='sos')
+        return sosfiltfilt(sos, data)
 
     def detect_sync_tone(self, audio_chunk):
         """Detect the synchronization tone using cross-correlation."""
         corr = correlate(audio_chunk, self.__sync_tone, mode='valid')
-        noise_floor = np.mean(np.abs(corr))
-        threshold = noise_floor*2
+        #noise_floor = np.mean(np.abs(corr))
+        #threshold = noise_floor*2
+        threshold = np.percentile(corr, 95)
         peak_indices = np.where(corr > threshold)[0]
         if len(peak_indices) > 0:
             return True, peak_indices[0]
@@ -293,7 +302,7 @@ class Receiver:
                     print("Synchronization tone detected. Decoding message...")
 
                     # Remove the sync tone and start decoding the remaining signal
-                    remaining_audio = audio_chunk[sync_start:]
+                    remaining_audio = audio_chunk[max(sync_start - frames_per_bit * 5, 0):]#keeps 5 bits of buffer before sync detection to prevent data loss
 
                     # Decode the filtered audio
                     bit_string = self.__reform_bit_String(remaining_audio, frames_per_bit)
