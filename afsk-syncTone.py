@@ -73,6 +73,8 @@ class Plot_helper:
         plt.xlabel("Frequency (Hz)")
         plt.ylabel("Magnitude")
         plt.show()
+    
+    # TODO: Add function to plot the audio signal which is captured by receiver's mircophone in real time.
 
 class Sender:
     def __init__(self, baud_rate: int = 300):
@@ -138,7 +140,7 @@ class Receiver:
         self.noise_profile = None
 
     def record_noise_profile(self, duration: float = 1.0):
-        """Record a noise profile for spectral subtraction."""
+        """Record a noise profile for spectral subtraction (later noise reduction)."""
         p = pyaudio.PyAudio()
         try:
             stream = p.open(
@@ -157,7 +159,7 @@ class Receiver:
             stream.stop_stream()
             stream.close()
             p.terminate()
-            
+
         self.noise_profile = noise_chunk
 
     def spectral_subtraction(self, signal, noise, alpha=1.0):
@@ -262,7 +264,7 @@ class Receiver:
 
     def receive_with_microphone_realtime(self, timeout: float, save_to_file: bool = False, output_filename: str = "received_audioTest.wav") -> str:
         print("Listening for signal...")
-
+        # TODO: need to be tested
         audio_chunks = []
         recorded_frames = 0
         max_frames = int(timeout * sample_rate)
