@@ -1,1 +1,1 @@
-Will be updated 
+Das Ziel dieses Projekts ist die Entwicklung eines softwaredefiniertes AFSK-Modems, das für digitale Datenübertragung über analoge Kommunikationskanäle eingesetzt werden kann. Dieses Modem nutzt die Standard-Audioeingänge und -ausgänge des Macbook und ermöglicht das Senden und Empfangen von Nachrichten ohne zusätzliche Hardware.
